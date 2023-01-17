@@ -82,13 +82,23 @@ function fastifyJwt (fastify, options, next) {
   let secretOrPrivateKey
   let secretOrPublicKey
 
+  let canSign = false
+
   if (typeof secret === 'object' && !Buffer.isBuffer(secret)) {
-    if (!secret.private || !secret.public) {
-      return next(new Error('missing private key and/or public key'))
+    if (secret.public) {
+      secretOrPublicKey = secret.public
+      if (secret.private) {
+        secretOrPrivateKey = secret.private
+        canSign = true
+      }
+    } else {
+      return next(new Error('missing public key'))
     }
-    secretOrPrivateKey = secret.private
-    secretOrPublicKey = secret.public
   } else {
+    if (initialSignOptions.algorithms && (initialSignOptions.algorthms.includes('ES') || initialSignOptions.algorithms.includes('RS') || initialSignOptions.algorithms.includes('PS') || initialSignOptions.algorithms.includes('EdDSA'))) {
+      return next(new Error('asymetric signing algorithms require both a public and private key'))
+    }
+    canSign = true
     secretOrPrivateKey = secretOrPublicKey = secret
   }
 
@@ -116,25 +126,6 @@ function fastifyJwt (fastify, options, next) {
   , 401)
   const BadRequestError = createError('FST_JWT_BAD_REQUEST', messagesOptions.badRequestErrorMessage, 400)
   const BadCookieRequestError = createError('FST_JWT_BAD_COOKIE_REQUEST', messagesOptions.badCookieRequestErrorMessage, 400)
-
-  if (
-    signOptions &&
-    signOptions.algorithm &&
-    signOptions.algorithm.includes('RS') &&
-    (typeof secret === 'string' ||
-      secret instanceof Buffer)
-  ) {
-    return next(new Error('RSA Signatures set as Algorithm in the options require a private and public key to be set as the secret'))
-  }
-  if (
-    signOptions &&
-    signOptions.algorithm &&
-    signOptions.algorithm.includes('ES') &&
-    (typeof secret === 'string' ||
-      secret instanceof Buffer)
-  ) {
-    return next(new Error('ECDSA Signatures set as Algorithm in the options require a private and public key to be set as the secret'))
-  }
 
   const jwtDecorator = {
     decode,
@@ -184,7 +175,9 @@ function fastifyJwt (fastify, options, next) {
   fastify.decorateReply(jwtSignName, replySign)
 
   const signerConfig = checkAndMergeSignOptions()
-  const signer = createSigner(signerConfig.options)
+  const signer = canSign
+    ? createSigner(signerConfig.options)
+    : () => { throw new Error('private key required and not provided in global options') }
   const decoder = createDecoder(decodeOptions)
   const verifierConfig = checkAndMergeVerifyOptions()
   const verifier = createVerifier(verifierConfig.options)
@@ -273,6 +266,7 @@ function fastifyJwt (fastify, options, next) {
 
   function sign (payload, options, callback) {
     assert(payload, 'missing payload')
+
     let localSigner = signer
 
     const localOptions = convertTemporalProps(options)
@@ -476,8 +470,8 @@ function fastifyJwt (fastify, options, next) {
           }
 
           if (error.code === TokenError.codes.invalidKey ||
-              error.code === TokenError.codes.invalidSignature ||
-              error.code === TokenError.codes.invalidClaimValue
+            error.code === TokenError.codes.invalidSignature ||
+            error.code === TokenError.codes.invalidClaimValue
           ) {
             return callback(typeof messagesOptions.authorizationTokenInvalid === 'function'
               ? new AuthorizationTokenInvalidError(error.message)
